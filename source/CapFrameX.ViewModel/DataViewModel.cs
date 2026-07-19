@@ -1546,15 +1546,27 @@ namespace CapFrameX.ViewModel
 
             var animationErrorsAbs = GetAnimationErrorsSubset()?.Select(error => Math.Abs(error)).ToList();
 
-            double GetFrametimeMetricValue(IList<double> sequence, EMetric metric) =>
-                _frametimeStatisticProvider.GetFrametimeMetricValue(sequence, metric);
-
             double GetP99MetricValue(IList<double> sequence) =>
                 Math.Round(_frametimeStatisticProvider.GetPQuantileSequence(sequence, 0.99),
                     _appConfiguration.FpsValuesRoundingDigits, MidpointRounding.AwayFromZero);
 
-            double GetMetricValue(IList<double> sequence, EMetric metric) =>
-                _frametimeStatisticProvider.GetFpsMetricValue(sequence, metric);
+            var requestedMetrics = new[]
+            {
+                EMetric.Max,
+                EMetric.P99,
+                EMetric.P95,
+                EMetric.Median,
+                EMetric.P0dot1,
+                EMetric.P0dot2,
+                EMetric.P1,
+                EMetric.P5,
+                EMetric.OnePercentLowAverage,
+                EMetric.ZerodotOnePercentLowAverage,
+                EMetric.OnePercentLowIntegral,
+                EMetric.ZerodotOnePercentLowIntegral,
+                EMetric.Min,
+                EMetric.AdaptiveStd
+            };
 
             var max = double.NaN;
             var p99_quantile = double.NaN;
@@ -1581,51 +1593,68 @@ namespace CapFrameX.ViewModel
 
             if (UseFrametimeStatisticParameters)
             {
-                max = GetFrametimeMetricValue(displayChangeTimes, EMetric.Max);
-                p99_quantile = GetFrametimeMetricValue(displayChangeTimes, EMetric.P99);
-                p95_quantile = GetFrametimeMetricValue(displayChangeTimes, EMetric.P95);
-                median = GetFrametimeMetricValue(displayChangeTimes, EMetric.Median);
-                average = GetFrametimeMetricValue(frametimes, EMetric.Average);
-                gpuActiveAverage = !gpuActiveTimes.IsNullOrEmpty() ? GetFrametimeMetricValue(gpuActiveTimes, EMetric.GpuActiveAverage) : double.NaN;
-                p0dot1_quantile = GetFrametimeMetricValue(displayChangeTimes, EMetric.P0dot1);
-                p0dot2_quantile = GetFrametimeMetricValue(displayChangeTimes, EMetric.P0dot2);
-                p1_quantile = GetFrametimeMetricValue(displayChangeTimes, EMetric.P1);
-                gpuActiveP1_quantile = !gpuActiveTimes.IsNullOrEmpty() ? GetFrametimeMetricValue(gpuActiveTimes, EMetric.GpuActiveP1) : double.NaN;
-                p5_quantile = GetFrametimeMetricValue(displayChangeTimes, EMetric.P5);
-                p1_LowAverage = GetFrametimeMetricValue(displayChangeTimes, EMetric.OnePercentLowAverage);
-                gpuActiveP1_LowAverage = !gpuActiveTimes.IsNullOrEmpty() ? GetFrametimeMetricValue(gpuActiveTimes, EMetric.GpuActiveOnePercentLowAverage) : double.NaN;
-                p0dot1_LowAverage = GetFrametimeMetricValue(displayChangeTimes, EMetric.ZerodotOnePercentLowAverage);
-                p1_LowIntegral = GetFrametimeMetricValue(displayChangeTimes, EMetric.OnePercentLowIntegral);
-                p0dot1_LowIntegral = GetFrametimeMetricValue(displayChangeTimes, EMetric.ZerodotOnePercentLowIntegral);
-                min = GetFrametimeMetricValue(displayChangeTimes, EMetric.Min);
-                adaptiveStandardDeviation = GetFrametimeMetricValue(displayChangeTimes, EMetric.AdaptiveStd);
+                var metricValues = _frametimeStatisticProvider
+                    .GetFrametimeMetricValues(displayChangeTimes, requestedMetrics);
+                max = metricValues[EMetric.Max];
+                p99_quantile = metricValues[EMetric.P99];
+                p95_quantile = metricValues[EMetric.P95];
+                median = metricValues[EMetric.Median];
+                average = _frametimeStatisticProvider
+                    .GetFrametimeMetricValue(frametimes, EMetric.Average);
+                p0dot1_quantile = metricValues[EMetric.P0dot1];
+                p0dot2_quantile = metricValues[EMetric.P0dot2];
+                p1_quantile = metricValues[EMetric.P1];
+                p5_quantile = metricValues[EMetric.P5];
+                p1_LowAverage = metricValues[EMetric.OnePercentLowAverage];
+                p0dot1_LowAverage = metricValues[EMetric.ZerodotOnePercentLowAverage];
+                p1_LowIntegral = metricValues[EMetric.OnePercentLowIntegral];
+                p0dot1_LowIntegral = metricValues[EMetric.ZerodotOnePercentLowIntegral];
+                min = metricValues[EMetric.Min];
+                adaptiveStandardDeviation = metricValues[EMetric.AdaptiveStd];
+
+                if (!gpuActiveTimes.IsNullOrEmpty())
+                {
+                    var gpuActiveMetricValues = _frametimeStatisticProvider.GetFrametimeMetricValues(
+                        gpuActiveTimes, new[]
+                        {
+                            EMetric.GpuActiveAverage,
+                            EMetric.GpuActiveP1,
+                            EMetric.GpuActiveOnePercentLowAverage
+                        });
+                    gpuActiveAverage = gpuActiveMetricValues[EMetric.GpuActiveAverage];
+                    gpuActiveP1_quantile = gpuActiveMetricValues[EMetric.GpuActiveP1];
+                    gpuActiveP1_LowAverage = gpuActiveMetricValues[EMetric.GpuActiveOnePercentLowAverage];
+                }
 
                 if (!animationErrorsAbs.IsNullOrEmpty())
                 {
-                    animationErrorAverage = GetFrametimeMetricValue(animationErrorsAbs, EMetric.Average);
+                    animationErrorAverage = _frametimeStatisticProvider
+                        .GetFrametimeMetricValue(animationErrorsAbs, EMetric.Average);
                     animationErrorP99 = GetP99MetricValue(animationErrorsAbs);
                 }
             }
             else
             {
-                max = GetMetricValue(displayChangeTimes, EMetric.Max);
-                p99_quantile = GetMetricValue(displayChangeTimes, EMetric.P99);
-                p95_quantile = GetMetricValue(displayChangeTimes, EMetric.P95);
-                median = GetMetricValue(displayChangeTimes, EMetric.Median);
-                average = GetMetricValue(frametimes, EMetric.Average);
+                var metricValues = _frametimeStatisticProvider
+                    .GetFpsMetricValues(displayChangeTimes, requestedMetrics);
+                max = metricValues[EMetric.Max];
+                p99_quantile = metricValues[EMetric.P99];
+                p95_quantile = metricValues[EMetric.P95];
+                median = metricValues[EMetric.Median];
+                average = _frametimeStatisticProvider.GetFpsMetricValue(frametimes, EMetric.Average);
                 //gpuActiveAverage = !gpuActiveTimes.IsNullOrEmpty() ? GetMetricValue(gpuActiveTimes, EMetric.GpuActiveAverage) : double.NaN;
-                p0dot1_quantile = GetMetricValue(displayChangeTimes, EMetric.P0dot1);
-                p0dot2_quantile = GetMetricValue(displayChangeTimes, EMetric.P0dot2);
-                p1_quantile = GetMetricValue(displayChangeTimes, EMetric.P1);
+                p0dot1_quantile = metricValues[EMetric.P0dot1];
+                p0dot2_quantile = metricValues[EMetric.P0dot2];
+                p1_quantile = metricValues[EMetric.P1];
                 //gpuActiveP1_quantile = !gpuActiveTimes.IsNullOrEmpty() ? GetMetricValue(gpuActiveTimes, EMetric.GpuActiveP1) : double.NaN;
-                p5_quantile = GetMetricValue(displayChangeTimes, EMetric.P5);
-                p1_LowAverage = GetMetricValue(displayChangeTimes, EMetric.OnePercentLowAverage);
+                p5_quantile = metricValues[EMetric.P5];
+                p1_LowAverage = metricValues[EMetric.OnePercentLowAverage];
                 //gpuActiveP1_LowAverage = !gpuActiveTimes.IsNullOrEmpty() ? GetMetricValue(gpuActiveTimes, EMetric.GpuActiveOnePercentLowAverage) : double.NaN;
-                p0dot1_LowAverage = GetMetricValue(displayChangeTimes, EMetric.ZerodotOnePercentLowAverage);
-                p1_LowIntegral = GetMetricValue(displayChangeTimes, EMetric.OnePercentLowIntegral);
-                p0dot1_LowIntegral = GetMetricValue(displayChangeTimes, EMetric.ZerodotOnePercentLowIntegral);
-                min = GetMetricValue(displayChangeTimes, EMetric.Min);
-                adaptiveStandardDeviation = GetMetricValue(displayChangeTimes, EMetric.AdaptiveStd);
+                p0dot1_LowAverage = metricValues[EMetric.ZerodotOnePercentLowAverage];
+                p1_LowIntegral = metricValues[EMetric.OnePercentLowIntegral];
+                p0dot1_LowIntegral = metricValues[EMetric.ZerodotOnePercentLowIntegral];
+                min = metricValues[EMetric.Min];
+                adaptiveStandardDeviation = metricValues[EMetric.AdaptiveStd];
                 cpuFpsPerWatt = _frametimeStatisticProvider
                     .GetPhysicalMetricValue(frametimes, EMetric.CpuFpsPerWatt,
                     SensorReport.GetAverageSensorValues(_session.Runs.Select(run => run.SensorData2), EReportSensorName.CpuPower,

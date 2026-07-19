@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using CapFrameX.Extensions.NetStandard;
 using CapFrameX.Data.Session.Contracts;
 
@@ -23,6 +24,26 @@ namespace CapFrameX.Statistics.NetStandard
         private static double[] _fpsBuffer;
         [ThreadStatic]
         private static double[] _sortBuffer;
+
+        private sealed class SortedSequenceAnalysis
+        {
+            public double[] Snapshot;
+            public double[] SortedFrametimes;
+            public double[] SortedFps;
+            public double TotalTime;
+        }
+
+        private sealed class SequenceCacheEntry
+        {
+            public readonly object Sync = new object();
+            public SortedSequenceAnalysis Analysis;
+        }
+
+        // The weak key does not keep discarded analysis windows alive. Mutable
+        // sequences are validated by exact IEEE-754 bits before cached data is reused.
+        private static readonly ConditionalWeakTable<IList<double>, SequenceCacheEntry>
+            SequenceAnalysisCache =
+                new ConditionalWeakTable<IList<double>, SequenceCacheEntry>();
 
         public FrametimeStatisticProvider(IFrametimeStatisticProviderOptions options)
         {
@@ -51,6 +72,58 @@ namespace CapFrameX.Statistics.NetStandard
                 _sortBuffer = new double[Math.Max(minSize, 1024)];
             }
             return _sortBuffer;
+        }
+
+        private static SortedSequenceAnalysis GetSortedSequenceAnalysis(IList<double> sequence)
+        {
+            var entry = SequenceAnalysisCache.GetValue(sequence, _ => new SequenceCacheEntry());
+            lock (entry.Sync)
+            {
+                if (entry.Analysis != null
+                    && SequenceMatchesSnapshot(sequence, entry.Analysis.Snapshot))
+                {
+                    return entry.Analysis;
+                }
+
+                var snapshot = sequence.ToArray();
+                var sortedFrametimes = (double[])snapshot.Clone();
+                Array.Sort(sortedFrametimes);
+
+                int count = sortedFrametimes.Length;
+                var sortedFps = new double[count];
+                double totalTime = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    totalTime += sortedFrametimes[i];
+                    sortedFps[i] = 1000.0 / sortedFrametimes[count - i - 1];
+                }
+
+                entry.Analysis = new SortedSequenceAnalysis
+                {
+                    Snapshot = snapshot,
+                    SortedFrametimes = sortedFrametimes,
+                    SortedFps = sortedFps,
+                    TotalTime = totalTime
+                };
+                return entry.Analysis;
+            }
+        }
+
+        private static bool SequenceMatchesSnapshot(IList<double> sequence, double[] snapshot)
+        {
+            if (snapshot == null || sequence.Count != snapshot.Length)
+                return false;
+
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                if (BitConverter.DoubleToInt64Bits(sequence[i])
+                    != BitConverter.DoubleToInt64Bits(snapshot[i]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         public double GetAdaptiveStandardDeviation(IList<double> sequence, double timeWindow)
@@ -375,6 +448,106 @@ namespace CapFrameX.Statistics.NetStandard
             }
         }
 
+        public IDictionary<EMetric, double> GetFpsMetricValues(IList<double> sequence,
+            IEnumerable<EMetric> metrics)
+        {
+            var requestedMetrics = metrics.Distinct().ToArray();
+            var results = new Dictionary<EMetric, double>(requestedMetrics.Length);
+
+            if (sequence == null || sequence.Count == 0)
+            {
+                foreach (EMetric metric in requestedMetrics)
+                    results[metric] = double.NaN;
+                return results;
+            }
+
+            try
+            {
+                var analysis = GetSortedSequenceAnalysis(sequence);
+                double[] sortedFrametimes = analysis.SortedFrametimes;
+                double[] sortedFps = analysis.SortedFps;
+                int count = sortedFrametimes.Length;
+                double totalTime = analysis.TotalTime;
+
+                foreach (EMetric metric in requestedMetrics)
+                {
+                    double metricValue;
+                    switch (metric)
+                    {
+                        case EMetric.Max:
+                            metricValue = sortedFps[count - 1];
+                            break;
+                        case EMetric.P99:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFps, 0.99);
+                            break;
+                        case EMetric.P95:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFps, 0.95);
+                            break;
+                        case EMetric.Average:
+                        case EMetric.GpuActiveAverage:
+                            metricValue = count * 1000 / totalTime;
+                            break;
+                        case EMetric.Median:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFps, 0.5);
+                            break;
+                        case EMetric.P5:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFps, 0.05);
+                            break;
+                        case EMetric.P1:
+                        case EMetric.GpuActiveP1:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFps, 0.01);
+                            break;
+                        case EMetric.P0dot2:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFps, 0.002);
+                            break;
+                        case EMetric.P0dot1:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFps, 0.001);
+                            break;
+                        case EMetric.OnePercentLowAverage:
+                        case EMetric.GpuActiveOnePercentLowAverage:
+                            metricValue = 1000 / GetHighAverageFromSorted(sortedFrametimes, 0.99);
+                            break;
+                        case EMetric.ZerodotTwoPercentLowAverage:
+                            metricValue = 1000 / GetHighAverageFromSorted(sortedFrametimes, 0.998);
+                            break;
+                        case EMetric.ZerodotOnePercentLowAverage:
+                            metricValue = 1000 / GetHighAverageFromSorted(sortedFrametimes, 0.999);
+                            break;
+                        case EMetric.OnePercentLowIntegral:
+                            metricValue = 1000 / GetHighIntegralFromSorted(sortedFrametimes, 0.99, totalTime);
+                            break;
+                        case EMetric.ZerodotTwoPercentLowIntegral:
+                            metricValue = 1000 / GetHighIntegralFromSorted(sortedFrametimes, 0.998, totalTime);
+                            break;
+                        case EMetric.ZerodotOnePercentLowIntegral:
+                            metricValue = 1000 / GetHighIntegralFromSorted(sortedFrametimes, 0.999, totalTime);
+                            break;
+                        case EMetric.Min:
+                            metricValue = sortedFps[0];
+                            break;
+                        case EMetric.AdaptiveStd:
+                            metricValue = GetAdaptiveStandardDeviation(
+                                sequence.Select(value => 1000.0 / value).ToList(),
+                                _options.IntervalAverageWindowTime);
+                            break;
+                        default:
+                            metricValue = double.NaN;
+                            break;
+                    }
+
+                    results[metric] = Math.Round(metricValue, _options.FpsValuesRoundingDigits,
+                        MidpointRounding.AwayFromZero);
+                }
+            }
+            catch (Exception)
+            {
+                foreach (EMetric metric in requestedMetrics)
+                    results[metric] = double.NaN;
+            }
+
+            return results;
+        }
+
         /// <summary>
         /// Gets the maximum value from an array segment without allocations.
         /// </summary>
@@ -478,6 +651,137 @@ namespace CapFrameX.Statistics.NetStandard
             }
 
             return Math.Round(metricValue, _options.FpsValuesRoundingDigits, MidpointRounding.AwayFromZero);
+        }
+
+        public IDictionary<EMetric, double> GetFrametimeMetricValues(IList<double> sequence,
+            IEnumerable<EMetric> metrics)
+        {
+            var requestedMetrics = metrics.Distinct().ToArray();
+            var results = new Dictionary<EMetric, double>(requestedMetrics.Length);
+
+            if (sequence == null || sequence.Count == 0)
+            {
+                foreach (EMetric metric in requestedMetrics)
+                    results[metric] = double.NaN;
+                return results;
+            }
+
+            try
+            {
+                var analysis = GetSortedSequenceAnalysis(sequence);
+                double[] sortedFrametimes = analysis.SortedFrametimes;
+                double totalTime = analysis.TotalTime;
+                int count = sortedFrametimes.Length;
+
+                foreach (EMetric metric in requestedMetrics)
+                {
+                    double metricValue;
+                    switch (metric)
+                    {
+                        case EMetric.Max:
+                            metricValue = sortedFrametimes[count - 1];
+                            break;
+                        case EMetric.P99:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFrametimes, 0.01);
+                            break;
+                        case EMetric.P95:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFrametimes, 0.05);
+                            break;
+                        case EMetric.Average:
+                        case EMetric.GpuActiveAverage:
+                        case EMetric.CpuActiveAverage:
+                            metricValue = totalTime / count;
+                            break;
+                        case EMetric.Median:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFrametimes, 0.5);
+                            break;
+                        case EMetric.P5:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFrametimes, 0.95);
+                            break;
+                        case EMetric.P1:
+                        case EMetric.GpuActiveP1:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFrametimes, 0.99);
+                            break;
+                        case EMetric.P0dot2:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFrametimes, 0.998);
+                            break;
+                        case EMetric.P0dot1:
+                            metricValue = SortedArrayStatistics.Quantile(sortedFrametimes, 0.999);
+                            break;
+                        case EMetric.OnePercentLowAverage:
+                        case EMetric.GpuActiveOnePercentLowAverage:
+                            metricValue = GetHighAverageFromSorted(sortedFrametimes, 0.99);
+                            break;
+                        case EMetric.ZerodotTwoPercentLowAverage:
+                            metricValue = GetHighAverageFromSorted(sortedFrametimes, 0.998);
+                            break;
+                        case EMetric.ZerodotOnePercentLowAverage:
+                            metricValue = GetHighAverageFromSorted(sortedFrametimes, 0.999);
+                            break;
+                        case EMetric.OnePercentLowIntegral:
+                            metricValue = GetHighIntegralFromSorted(sortedFrametimes, 0.99, totalTime);
+                            break;
+                        case EMetric.ZerodotTwoPercentLowIntegral:
+                            metricValue = GetHighIntegralFromSorted(sortedFrametimes, 0.998, totalTime);
+                            break;
+                        case EMetric.ZerodotOnePercentLowIntegral:
+                            metricValue = GetHighIntegralFromSorted(sortedFrametimes, 0.999, totalTime);
+                            break;
+                        case EMetric.Min:
+                            metricValue = sortedFrametimes[0];
+                            break;
+                        case EMetric.AdaptiveStd:
+                            metricValue = GetAdaptiveStandardDeviation(sequence,
+                                _options.IntervalAverageWindowTime);
+                            break;
+                        default:
+                            metricValue = double.NaN;
+                            break;
+                    }
+
+                    results[metric] = Math.Round(metricValue, _options.FpsValuesRoundingDigits,
+                        MidpointRounding.AwayFromZero);
+                }
+            }
+            catch (Exception)
+            {
+                foreach (EMetric metric in requestedMetrics)
+                    results[metric] = double.NaN;
+            }
+
+            return results;
+        }
+
+        private static double GetHighAverageFromSorted(double[] sortedFrametimes, double quantile)
+        {
+            double threshold = SortedArrayStatistics.Quantile(sortedFrametimes, quantile);
+            double sum = 0;
+            int count = 0;
+
+            for (int i = sortedFrametimes.Length - 1;
+                i >= 0 && sortedFrametimes[i] >= threshold; i--)
+            {
+                sum += sortedFrametimes[i];
+                count++;
+            }
+
+            return sum / count;
+        }
+
+        private static double GetHighIntegralFromSorted(double[] sortedFrametimes,
+            double quantile, double totalTime)
+        {
+            double targetTime = totalTime * (1 - quantile);
+            double accumulatedTime = 0;
+
+            for (int i = sortedFrametimes.Length - 1; i >= 0; i--)
+            {
+                accumulatedTime += sortedFrametimes[i];
+                if (accumulatedTime >= targetTime)
+                    return sortedFrametimes[i];
+            }
+
+            return sortedFrametimes[0];
         }
 
         public double GetPhysicalMetricValue(IList<double> sequence, EMetric metric, double coefficient)
@@ -613,34 +917,42 @@ namespace CapFrameX.Statistics.NetStandard
         public IMetricAnalysis GetMetricAnalysis(IList<double> frametimes, IList<double> displaytimes,
             bool useDisplayChangeMetrics, string secondMetric, string thirdMetric)
         {
-            var average = GetFpsMetricValue(frametimes, EMetric.Average);
+            var secondMetricType = secondMetric.ConvertToEnum<EMetric>();
+            var thirdMetricType = thirdMetric.ConvertToEnum<EMetric>();
+            var frametimeMetricTypes = useDisplayChangeMetrics
+                ? new[] { EMetric.Average }
+                : new[] { EMetric.Average, secondMetricType, thirdMetricType };
+            var frametimeMetricValues = GetFpsMetricValues(frametimes, frametimeMetricTypes);
 
+            var average = frametimeMetricValues[EMetric.Average];
             double secondMetricValue;
             double thrirdMetricValue;
 
-            if (!useDisplayChangeMetrics)
+            if (useDisplayChangeMetrics)
             {
-                secondMetricValue = GetFpsMetricValue(frametimes, secondMetric.ConvertToEnum<EMetric>());
-                thrirdMetricValue = GetFpsMetricValue(frametimes, thirdMetric.ConvertToEnum<EMetric>());
+                var displayMetricValues = GetFpsMetricValues(displaytimes,
+                    new[] { secondMetricType, thirdMetricType });
+                secondMetricValue = displayMetricValues[secondMetricType];
+                thrirdMetricValue = displayMetricValues[thirdMetricType];
             }
             else
             {
-                secondMetricValue = GetFpsMetricValue(displaytimes, secondMetric.ConvertToEnum<EMetric>());
-                thrirdMetricValue = GetFpsMetricValue(displaytimes, thirdMetric.ConvertToEnum<EMetric>());
+                secondMetricValue = frametimeMetricValues[secondMetricType];
+                thrirdMetricValue = frametimeMetricValues[thirdMetricType];
             }
 
             string numberFormat = string.Format("F{0}", _options.FpsValuesRoundingDigits);
             var cultureInfo = CultureInfo.InvariantCulture;
 
             string secondMetricString =
-                secondMetric.ConvertToEnum<EMetric>() != EMetric.None ?
-                " | " + $"{secondMetric.ConvertToEnum<EMetric>().GetShortDescription()}=" +
+                secondMetricType != EMetric.None ?
+                " | " + $"{secondMetricType.GetShortDescription()}=" +
                 $"{secondMetricValue.ToString(numberFormat, cultureInfo)} " +
                 $"FPS" : string.Empty;
 
             string thirdMetricString =
-                thirdMetric.ConvertToEnum<EMetric>() != EMetric.None ?
-                " | " + $"{thirdMetric.ConvertToEnum<EMetric>().GetShortDescription()}=" +
+                thirdMetricType != EMetric.None ?
+                " | " + $"{thirdMetricType.GetShortDescription()}=" +
                 $"{thrirdMetricValue.ToString(numberFormat, cultureInfo)} " +
                 $"FPS" : string.Empty;
 
