@@ -82,6 +82,49 @@ namespace CapFrameX.Test.Statistics
         }
 
         [TestMethod]
+        public void GetFrametimeDistributionPoints_IsTimeWeightedAndSumsToOneHundredPercent()
+        {
+            var session = CreateSession(
+                new[] { 0d, 1d, 2d },
+                new[] { 10.01d, 10.09d, 20d });
+
+            var distribution = session.GetFrametimeDistributionPoints(0, 2, _options);
+
+            Assert.AreEqual(2, distribution.Count);
+            Assert.AreEqual(100, distribution.Sum(point => point.Y), 0.000001);
+            Assert.AreEqual((10.01 + 10.09) / 40.1 * 100, distribution[0].Y, 0.000001);
+            Assert.AreEqual(20 / 40.1 * 100, distribution[1].Y, 0.000001);
+            Assert.AreEqual(20, distribution[1].X, 0.000001);
+        }
+
+        [TestMethod]
+        public void GetFrametimeDistributionPoints_UsesHalfOpenBins()
+        {
+            var session = CreateSession(
+                new[] { 0d, 1d, 2d },
+                new[] { 10d, 10.1d, 10.11d });
+
+            var distribution = session.GetFrametimeDistributionPoints(0, 2, _options);
+
+            CollectionAssert.AreEqual(new[] { 10.1d, 10.2d },
+                distribution.Select(point => point.X).ToArray());
+        }
+
+        [TestMethod]
+        public void GetFrametimeDistributionPoints_ExactMaximumBinEdge_UsesFinalInclusiveBin()
+        {
+            var session = CreateSession(
+                new[] { 0d, 1d },
+                new[] { 0.2d, 0.3d });
+
+            var distribution = session.GetFrametimeDistributionPoints(0, 1, _options);
+
+            Assert.AreEqual(1, distribution.Count);
+            Assert.AreEqual(0.3d, distribution[0].X, 0.000000001);
+            Assert.AreEqual(100d, distribution[0].Y, 0.000001);
+        }
+
+        [TestMethod]
         public void GetAnimationErrorTimeWindow_RejectsNonFiniteSamples()
         {
             var session = CreateSession(

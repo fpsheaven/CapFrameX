@@ -695,49 +695,39 @@ namespace CapFrameX.Statistics.NetStandard
             if (filteredFrameTimes.Count == 0)
                 return new List<Point>();
 
-            // Bin increments
-            const double increments = 0.1;
+            const double increment = 0.1;
             double maxValue = filteredFrameTimes.Max();
-
-
-            // Create Bins (start, end)
-            List<(double start, double end)> bins = new List<(double, double)>();
-            for (double start = 0; start < maxValue; start += increments)
-            {
-                double end = Math.Round(start + increments, 10);
-                bins.Add((start, end));
-            }
-
-            // Expand last bin if maxValue doesn't fit
-            if (bins.Count == 0 || bins.Last().end < maxValue)
-            {
-                double start = bins.Count > 0 ? bins.Last().end : 0;
-                double end = Math.Round(start + increments, 10);
-                bins.Add((start, end));
-            }
-
-
-            // Distribution list (X = bin threshold, Y = percentage)
             double totalSum = filteredFrameTimes.Sum();
-            List<Point> frametimeDistribution = new List<Point>();
+            var binSums = new Dictionary<int, double>();
 
-            foreach (var (start, end) in bins)
+            // Allocate only occupied bins. A single long hitch therefore cannot
+            // create and scan a dense range of empty 0.1 ms buckets.
+            for (int i = 0; i < filteredFrameTimes.Count; i++)
             {
-                bool isLastBin = (start, end) == bins.Last();
+                double value = filteredFrameTimes[i];
+                double scaledValue = value / increment;
+                double roundedScaledValue = Math.Round(scaledValue);
+                if (Math.Abs(scaledValue - roundedScaledValue) < 1E-9)
+                    scaledValue = roundedScaledValue;
 
-                // sum of values in bin
-                double binSum = filteredFrameTimes
-                    .Where(w => isLastBin ? (w >= start && w <= end) : (w >= start && w < end))
-                    .Sum();
+                int binIndex = (int)Math.Floor(scaledValue);
 
-                if (binSum > 0 )
-                {
-                    double percentage = (binSum / totalSum) * 100;
-                    frametimeDistribution.Add(new Point(end, percentage));
-                }
+                // All bins are [start, end), except that an exact maximum edge is
+                // included in the final preceding bin to match the legacy chart.
+                if (value == maxValue && binIndex > 0 && scaledValue == roundedScaledValue)
+                    binIndex--;
+
+                double currentSum;
+                binSums.TryGetValue(binIndex, out currentSum);
+                binSums[binIndex] = currentSum + value;
             }
 
-            return frametimeDistribution;
+            return binSums
+                .OrderBy(pair => pair.Key)
+                .Select(pair => new Point(
+                    Math.Round((pair.Key + 1) * increment, 10),
+                    pair.Value / totalSum * 100))
+                .ToList();
         }
     }
 }
