@@ -404,6 +404,99 @@ namespace CapFrameX.Test.Statistics
         }
 
         [TestMethod]
+        public void GetFpsMetricValues_MatchesIndividualMetricCalculations()
+        {
+            var sequence = Enumerable.Range(0, 5000)
+                .Select(index => 5.0 + index % 300 / 10.0)
+                .ToList();
+            var metrics = GetBatchMetrics();
+
+            var batch = _provider.GetFpsMetricValues(sequence, metrics);
+
+            foreach (EMetric metric in metrics)
+            {
+                Assert.AreEqual(_provider.GetFpsMetricValue(sequence, metric), batch[metric], 0.001,
+                    $"Batch result differs for {metric}");
+            }
+        }
+
+        [TestMethod]
+        public void GetFrametimeMetricValues_MatchesIndividualMetricCalculations()
+        {
+            var sequence = Enumerable.Range(0, 5000)
+                .Select(index => 5.0 + index % 300 / 10.0)
+                .ToList();
+            var metrics = GetBatchMetrics();
+
+            var batch = _provider.GetFrametimeMetricValues(sequence, metrics);
+
+            foreach (EMetric metric in metrics)
+            {
+                Assert.AreEqual(_provider.GetFrametimeMetricValue(sequence, metric), batch[metric], 0.001,
+                    $"Batch result differs for {metric}");
+            }
+        }
+
+        [TestMethod]
+        public void GetFrametimeMetricValues_RepeatedAnalysisInvalidatesAfterInPlaceMutation()
+        {
+            var sequence = Enumerable.Range(0, 5000)
+                .Select(index => 5.0 + index % 300 / 10.0)
+                .ToList();
+            var metrics = new[]
+            {
+                EMetric.Average, EMetric.P1, EMetric.P0dot1,
+                EMetric.OnePercentLowAverage, EMetric.ZerodotOnePercentLowAverage
+            };
+
+            _provider.GetFrametimeMetricValues(sequence, metrics);
+            sequence[2500] = 100000;
+
+            var cachedResult = _provider.GetFrametimeMetricValues(sequence, metrics);
+            var freshResult = _provider.GetFrametimeMetricValues(sequence.ToArray(), metrics);
+
+            foreach (EMetric metric in metrics)
+            {
+                Assert.AreEqual(freshResult[metric], cachedResult[metric], 0.0,
+                    $"Cached result was stale for {metric}");
+            }
+        }
+
+        [TestMethod]
+        public void GetMetricAnalysis_DisplayMetrics_UsesDisplayTimesOnlyForLowMetrics()
+        {
+            var frametimes = Enumerable.Range(0, 10000)
+                .Select(index => 5.0 + index % 500 / 25.0)
+                .ToList();
+            var displayTimes = Enumerable.Range(0, 10000)
+                .Select(index => 7.0 + index % 400 / 16.0)
+                .ToList();
+
+            var analysis = _provider.GetMetricAnalysis(frametimes, displayTimes, true,
+                EMetric.P1.ToString(), EMetric.P0dot1.ToString());
+
+            Assert.AreEqual(_provider.GetFpsMetricValue(frametimes, EMetric.Average),
+                analysis.Average, 0.001);
+            Assert.AreEqual(_provider.GetFpsMetricValue(displayTimes, EMetric.P1),
+                analysis.Second, 0.001);
+            Assert.AreEqual(_provider.GetFpsMetricValue(displayTimes, EMetric.P0dot1),
+                analysis.Third, 0.001);
+        }
+
+        private static EMetric[] GetBatchMetrics()
+        {
+            return new[]
+            {
+                EMetric.Max, EMetric.P99, EMetric.P95, EMetric.Average, EMetric.Median,
+                EMetric.P5, EMetric.P1, EMetric.P0dot2, EMetric.P0dot1,
+                EMetric.OnePercentLowAverage, EMetric.ZerodotTwoPercentLowAverage,
+                EMetric.ZerodotOnePercentLowAverage, EMetric.OnePercentLowIntegral,
+                EMetric.ZerodotTwoPercentLowIntegral, EMetric.ZerodotOnePercentLowIntegral,
+                EMetric.Min
+            };
+        }
+
+        [TestMethod]
         public void GetVariancePercentages_ClassifiesEachThresholdExactlyOnce()
         {
             var sequence = new List<double> { 0, 1, 4, 10, 20, 35 };
